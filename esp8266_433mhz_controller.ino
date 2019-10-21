@@ -1,11 +1,13 @@
 /**
  * ESP8266 driven 433Mhz transmitter to control relays
  * Incuding DHT22 temp/humidity sensor
- * and possibility to control lights by clock
+ * and possibility to control relays by clock
  * 
  * Toni Alho 2019
- * With some help of https://tttapa.github.io/ESP8266/Chap10%20-%20Simple%20Web%20Server.html
  */
+
+// Confiq file for keeping WLAN credentials out from code and public repositories
+#include "config.h"
 
 // Include libraries ESP requires
 #include <ESP8266WiFi.h>
@@ -25,29 +27,32 @@
 #define DHTTYPE DHT22
 
 // Wifi credentials
-const char* ssid = "Koti527";
-const char* password = "SFLVTTGTAE4TK";
-
-// Create server object listening to defined port
-ESP8266WebServer server(80);
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
 // Define variables related to DHT
 byte DHTPin = D7;
 double temp;
 double hum;
 
-// Boolean to help controlling time controlled lights switch
+// UTC offset in seconds for Finland's timezone UTC +3 (incl daylight saving time)
+const int utcOffset = 10800;
+
+// BlinkWithoutDelay variables
+const long updateInterval = 60000; // in milliseconds
+unsigned long prevMillis = 0;
+
+// Boolean token to tell if the lights have been switched on
 bool lightsOn = 0;
 
-// Create DHT object
+// Create required objects
+ESP8266WebServer server(80);
 DHT dht(DHTPin, DHTTYPE);
-
-// Create RCSwitch object
 RCSwitch transmitter = RCSwitch();
-
-// NTP
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP);
+
+// Create the NTPClient object with given parameters
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", utcOffset);
 
 // Function prototypes
 void handleRoot();
@@ -65,15 +70,17 @@ void setup() {
   Serial.begin(115200);
   Serial.println("");
 
-  // DHT
+  // DHT setup
   pinMode(DHTPin, INPUT);
   dht.begin();
+  Serial.println("DHT set up");
 
   // RCSwitch setup
   transmitter.enableTransmit(D8);
   transmitter.setProtocol(4);
   transmitter.setRepeatTransmit(10);
-
+  Serial.println("433Mhz transmitter set up");
+  
   // Connect to WiFi
   WiFi.begin(ssid, password);
   Serial.println("Connecting");
@@ -100,11 +107,6 @@ void setup() {
   server.begin();
   Serial.println("Server started");
 
-  // Save DHT output to according variables
-  temp = dht.readTemperature();
-  hum = dht.readHumidity();   
-  Serial.println("Read DHT");
-
   // Start the mDNS responder
   if (!MDNS.begin("ESP")) {
     Serial.println("Error setting up MDNS responder!");
@@ -113,6 +115,12 @@ void setup() {
 
   // Start the NTP receiver
   timeClient.begin();
+  Serial.println("NTP receiver started");
+  
+  // First read on DHT values
+  temp = dht.readTemperature();
+  hum = dht.readHumidity();   
+  Serial.println("Read DHT");
 }
 
 
@@ -123,19 +131,31 @@ void loop() {
   // To keep mDNS working
   MDNS.update();
 
-  // Update time
-  timeClient.update();
+  // Millis counter (BlinkWithoutDelay)
+  unsigned long currentMillis = millis();
 
-  // Lights timing
-  if(lightsOn == 0 && timeClient.getHours() == 7 && timeClient.getMinutes() == 15){
-    handleRelay1On();
-    handleRelay2On();
-    lightsOn = 1;
-  }
+  // Executed when defined update interval time has passed (once per minute)
+  if(currentMillis - prevMillis > updateInterval){
+    prevMillis = currentMillis;
+    timeClient.update();
+    Serial.println(timeClient.getFormattedTime());
 
-  // Reset the lightsOn
-  if(timeClient.getHours() == 7 && timeClient.getMinutes() == 17){
-    lightsOn = 0;
+    // Temperature & humidity update
+    temp = dht.readTemperature();
+    hum = dht.readHumidity();   
+    Serial.println("Read DHT");
+
+    // Lights timing
+    if(lightsOn == 0 && timeClient.getHours() == 9 && timeClient.getMinutes() == 15){
+      handleRelay1On();
+      handleRelay2On();
+      lightsOn = 1;
+    }
+
+    // Reset the lightsOn soon after switching lights on
+    if(timeClient.getHours() == 9 && timeClient.getMinutes() == 17){
+      lightsOn = 0;
+    }
   }
 }
 
@@ -144,11 +164,6 @@ void loop() {
 // ==========HANDLERS===========
 // =============================
 void handleRoot(){
-  // Save DHT output to according variables
-  temp = dht.readTemperature();
-  hum = dht.readHumidity();   
-  Serial.println("Read DHT");
-
   // Compile and send the root
   String mes = "<head><meta name='apple-mobile-web-app-capable' content='yes' /><meta name='apple-mobile-web-app-status-bar-style' content='black-translucent' /><meta charset=""UTF-8""><meta name=""viewport"" content=""width=device-width, initial-scale=1""></head><body><center><h2>ESP8266 Relay Controller</h2><br><h3><center>Lämpötila: </center></h3>";
   mes += temp;
@@ -161,8 +176,8 @@ void handleRoot(){
 void handleRelay1On() {
   transmitter.send(13378884, 24);
   Serial.println("Light 1 ON"); 
-  server.sendHeader("Location","/");        // Add a header to respond with a new location for the browser to go to the home page again
-  server.send(303);                         // Send it back to the browser with an HTTP status 303 (See Other) to redirect
+  server.sendHeader("Location","/");
+  server.send(303);
 }
 
 void handleRelay1Off() {
